@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { onBeforeUnmount, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
@@ -13,11 +13,33 @@ const form = reactive({
 })
 
 const loading = ref(false)
-const errorMessage = ref('')
+const alertMessage = ref('')
+const alertTimerId = ref(null)
+
+const clearAlertTimer = () => {
+  if (alertTimerId.value) {
+    clearTimeout(alertTimerId.value)
+    alertTimerId.value = null
+  }
+}
+
+const dismissAlert = () => {
+  alertMessage.value = ''
+  clearAlertTimer()
+}
+
+const notifyError = (message) => {
+  clearAlertTimer()
+  alertMessage.value = message
+  alertTimerId.value = setTimeout(() => {
+    alertMessage.value = ''
+    alertTimerId.value = null
+  }, 3000)
+}
 
 const onSubmit = async () => {
   loading.value = true
-  errorMessage.value = ''
+  alertMessage.value = ''
 
   try {
     const response = await fetch('/api/auth/login', {
@@ -37,11 +59,13 @@ const onSubmit = async () => {
     auth.setSession(data)
     router.push('/form')
   } catch (error) {
-    errorMessage.value = error.message
+    notifyError(error?.message || 'Invalid credentials.')
   } finally {
     loading.value = false
   }
 }
+
+onBeforeUnmount(clearAlertTimer)
 </script>
 
 <template>
@@ -55,7 +79,9 @@ const onSubmit = async () => {
                 <h1>Login</h1>
                 <p class="text-body-secondary">Sign in to continue</p>
 
-                <CAlert v-if="errorMessage" color="danger">{{ errorMessage }}</CAlert>
+                <CAlert v-if="alertMessage" class="floating-alert" color="danger" dismissible @close="dismissAlert">
+                  {{ alertMessage }}
+                </CAlert>
 
                 <CInputGroup class="mb-3">
                   <CInputGroupText>
@@ -91,3 +117,14 @@ const onSubmit = async () => {
     </CContainer>
   </div>
 </template>
+
+<style scoped>
+.floating-alert {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  width: min(560px, calc(100vw - 2rem));
+}
+</style>

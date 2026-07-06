@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
@@ -10,15 +10,91 @@ const auth = useAuthStore()
 
 const showShell = computed(() => route.name !== 'Login' && auth.isAuthenticated)
 const isSidebarOpen = ref(true)
+const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000
+const ACTIVITY_EVENTS = ['click', 'mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart']
+
+let inactivityTimerId = null
 
 const toggleSidebar = () => {
   isSidebarOpen.value = !isSidebarOpen.value
 }
 
+watch(
+  () => [route.fullPath, auth.isAuthenticated],
+  ([, isAuthenticated]) => {
+    if (isAuthenticated) {
+      // Keep the sidebar collapsed after login and each route navigation.
+      isSidebarOpen.value = false
+    }
+  },
+  { immediate: true },
+)
+
 const onLogout = () => {
+  clearInactivityTimer()
   auth.logout()
   router.push('/login')
 }
+
+const clearInactivityTimer = () => {
+  if (inactivityTimerId) {
+    window.clearTimeout(inactivityTimerId)
+    inactivityTimerId = null
+  }
+}
+
+const handleInactivityLogout = () => {
+  if (!auth.isAuthenticated) {
+    return
+  }
+
+  auth.logout()
+  router.push('/login')
+}
+
+const resetInactivityTimer = () => {
+  if (!auth.isAuthenticated) {
+    clearInactivityTimer()
+    return
+  }
+
+  clearInactivityTimer()
+  inactivityTimerId = window.setTimeout(handleInactivityLogout, INACTIVITY_TIMEOUT_MS)
+}
+
+const addActivityListeners = () => {
+  ACTIVITY_EVENTS.forEach((eventName) => {
+    window.addEventListener(eventName, resetInactivityTimer, { passive: true })
+  })
+}
+
+const removeActivityListeners = () => {
+  ACTIVITY_EVENTS.forEach((eventName) => {
+    window.removeEventListener(eventName, resetInactivityTimer)
+  })
+}
+
+watch(
+  () => auth.isAuthenticated,
+  (isAuthenticated) => {
+    if (isAuthenticated) {
+      resetInactivityTimer()
+      return
+    }
+
+    clearInactivityTimer()
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  addActivityListeners()
+})
+
+onBeforeUnmount(() => {
+  clearInactivityTimer()
+  removeActivityListeners()
+})
 </script>
 
 <template>

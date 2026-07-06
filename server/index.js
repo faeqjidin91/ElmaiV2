@@ -20,6 +20,47 @@ const port = Number(process.env.API_PORT || 3001)
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
+const getIpAddress = (req) => {
+  const forwardedFor = req.headers['x-forwarded-for']
+  if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+    return forwardedFor.split(',')[0].trim()
+  }
+
+  return req.ip || null
+}
+
+const logAuditEvent = async ({ req, action, entityType, entityId = null, details = null }) => {
+  try {
+    const pool = await getPool()
+    await pool.query(
+      `
+        INSERT INTO AuditLogs (
+          ActorUserId,
+          ActorUsername,
+          Action,
+          EntityType,
+          EntityId,
+          Details,
+          IpAddress,
+          UserAgent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        req.user?.id || null,
+        req.user?.username || 'system',
+        action,
+        entityType,
+        entityId === null ? null : String(entityId),
+        details,
+        getIpAddress(req),
+        req.headers['user-agent'] || null,
+      ],
+    )
+  } catch (error) {
+    console.error('Failed to write audit log:', error)
+  }
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' })
 })
@@ -129,7 +170,7 @@ app.post('/api/ships', authenticate, requireRole(['admin', 'superadmin']), async
     return res.status(409).json({ error: 'Ship code or IMO number already exists.' })
   }
 
-  await pool.query(
+  const [result] = await pool.query(
     `
       INSERT INTO Ships (
         ShipName,
@@ -162,7 +203,117 @@ app.post('/api/ships', authenticate, requireRole(['admin', 'superadmin']), async
     ],
   )
 
+  await logAuditEvent({
+    req,
+    action: 'create',
+    entityType: 'ship',
+    entityId: result.insertId,
+    details: {
+      shipName,
+      shipCode,
+      imoNumber,
+      status: status || 'active',
+    },
+  })
+
   return res.status(201).json({ message: 'Ship registered successfully.' })
+})
+
+app.put('/api/ships/:id', authenticate, requireRole(['admin', 'superadmin']), async (req, res) => {
+  const shipId = Number(req.params.id)
+  const {
+    shipName,
+    shipCode,
+    imoNumber,
+    mmsiNumber,
+    flagState,
+    callSign,
+    cargoType,
+    grossTonnage,
+    deadweightTonnage,
+    yearBuilt,
+    status,
+    notes,
+  } = req.body
+
+  if (!Number.isInteger(shipId)) {
+    return res.status(400).json({ error: 'Invalid ship ID.' })
+  }
+
+  if (!shipName || !shipCode || !imoNumber || !flagState || !cargoType) {
+    return res.status(400).json({
+      error: 'shipName, shipCode, imoNumber, flagState, and cargoType are required.',
+    })
+  }
+
+  const pool = await getPool()
+  const [existingShipRows] = await pool.query('SELECT Id FROM Ships WHERE Id = ?', [shipId])
+  if (existingShipRows.length === 0) {
+    return res.status(404).json({ error: 'Ship not found.' })
+  }
+
+  const [duplicates] = await pool.query(
+    'SELECT Id FROM Ships WHERE (ShipCode = ? OR ImoNumber = ?) AND Id <> ?',
+    [shipCode, imoNumber, shipId],
+  )
+
+  if (duplicates.length > 0) {
+    return res.status(409).json({ error: 'Ship code or IMO number already exists.' })
+  }
+
+  const [result] = await pool.query(
+    `
+      UPDATE Ships
+      SET
+        ShipName = ?,
+        ShipCode = ?,
+        ImoNumber = ?,
+        MmsiNumber = ?,
+        FlagState = ?,
+        CallSign = ?,
+        CargoType = ?,
+        GrossTonnage = ?,
+        DeadweightTonnage = ?,
+        YearBuilt = ?,
+        Status = ?,
+        Notes = ?
+      WHERE Id = ?
+    `,
+    [
+      shipName,
+      shipCode,
+      imoNumber,
+      mmsiNumber || null,
+      flagState,
+      callSign || null,
+      cargoType,
+      grossTonnage || null,
+      deadweightTonnage || null,
+      yearBuilt || null,
+      status || 'active',
+      notes || null,
+      shipId,
+    ],
+  )
+
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ error: 'Ship not found.' })
+  }
+
+  await logAuditEvent({
+    req,
+    action: 'update',
+    entityType: 'ship',
+    entityId: shipId,
+    details: {
+      shipName,
+      shipCode,
+      imoNumber,
+      status: status || 'active',
+    },
+  })
+
+  return res.json({ message: 'Ship updated successfully.' })
 })
 
 app.post('/api/users', authenticate, requireRole(['admin', 'superadmin']), async (req, res) => {
@@ -188,11 +339,22 @@ app.post('/api/users', authenticate, requireRole(['admin', 'superadmin']), async
   }
 
   const passwordHash = await bcrypt.hash(password, 10)
-  await pool.query('INSERT INTO Users (Username, PasswordHash, Role) VALUES (?, ?, ?)', [
+  const [result] = await pool.query('INSERT INTO Users (Username, PasswordHash, Role) VALUES (?, ?, ?)', [
     username,
     passwordHash,
     role,
   ])
+
+  await logAuditEvent({
+    req,
+    action: 'create',
+    entityType: 'user',
+    entityId: result.insertId,
+    details: {
+      username,
+      role,
+    },
+  })
 
   return res.status(201).json({ message: 'User created.' })
 })
@@ -231,6 +393,17 @@ app.put('/api/users/:id/role', authenticate, requireRole(['admin', 'superadmin']
     return res.status(404).json({ error: 'User not found.' })
   }
 
+  await logAuditEvent({
+    req,
+    action: 'update-role',
+    entityType: 'user',
+    entityId: userId,
+    details: {
+      previousRole: targetUser.Role,
+      newRole: role,
+    },
+  })
+
   return res.json({ message: 'Role updated.' })
 })
 
@@ -242,10 +415,21 @@ app.post('/api/forms', authenticate, async (req, res) => {
   }
 
   const pool = await getPool()
-  await pool.query(
+  const [result] = await pool.query(
     'INSERT INTO FormSubmissions (FullName, IcPassportNumber, ImageBase64, SubmittedByUserId) VALUES (?, ?, ?, ?)',
     [fullName, icPassportNumber, imageBase64, req.user.id],
   )
+
+  await logAuditEvent({
+    req,
+    action: 'create',
+    entityType: 'form-submission',
+    entityId: result.insertId,
+    details: {
+      fullName,
+      icPassportNumber,
+    },
+  })
 
   return res.status(201).json({ message: 'Form submitted.' })
 })
@@ -367,6 +551,20 @@ app.post('/api/batches', authenticate, requireRole(['admin', 'superadmin']), asy
     }
 
     await connection.commit()
+
+    await logAuditEvent({
+      req,
+      action: 'create',
+      entityType: 'batch-group',
+      entityId: batchGroupId,
+      details: {
+        batchName,
+        shipId: normalizedShipId,
+        expiryDate,
+        memberCount: normalizedSubmissionIds.length,
+      },
+    })
+
     return res.status(201).json({ message: 'Batch group created.', id: batchGroupId })
   } catch (error) {
     await connection.rollback()
@@ -549,6 +747,20 @@ app.put('/api/batches/:id', authenticate, requireRole(['admin', 'superadmin']), 
     }
 
     await connection.commit()
+
+    await logAuditEvent({
+      req,
+      action: 'update',
+      entityType: 'batch-group',
+      entityId: batchId,
+      details: {
+        batchName,
+        shipId: normalizedShipId,
+        expiryDate,
+        memberCount: normalizedSubmissionIds.length,
+      },
+    })
+
     return res.json({ message: 'Batch group updated.' })
   } catch (error) {
     await connection.rollback()
@@ -580,6 +792,14 @@ app.delete('/api/batches/:id', authenticate, requireRole(['admin', 'superadmin']
     await connection.query('DELETE FROM BatchGroups WHERE Id = ?', [batchId])
 
     await connection.commit()
+
+    await logAuditEvent({
+      req,
+      action: 'delete',
+      entityType: 'batch-group',
+      entityId: batchId,
+    })
+
     return res.json({ message: 'Batch group removed.' })
   } catch (error) {
     await connection.rollback()

@@ -107,18 +107,40 @@ export const initializeDatabase = async () => {
     ) ENGINE=InnoDB
   `)
 
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS AuditLogs (
+      Id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      ActorUserId INT NULL,
+      ActorUsername VARCHAR(100) NOT NULL,
+      Action VARCHAR(100) NOT NULL,
+      EntityType VARCHAR(100) NOT NULL,
+      EntityId VARCHAR(100) NULL,
+      Details JSON NULL,
+      IpAddress VARCHAR(100) NULL,
+      UserAgent VARCHAR(255) NULL,
+      CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT FK_AuditLogs_Users FOREIGN KEY (ActorUserId) REFERENCES Users(Id) ON DELETE SET NULL
+    ) ENGINE=InnoDB
+  `)
+
   const superadminUsername = process.env.SUPERADMIN_USERNAME || 'superadmin'
   const superadminPassword = process.env.SUPERADMIN_PASSWORD || 'SuperAdmin123!'
 
   const [existingSuperadmin] = await db.query('SELECT Id FROM Users WHERE Username = ?', [superadminUsername])
+  const superadminPasswordHash = await bcrypt.hash(superadminPassword, 10)
 
   if (existingSuperadmin.length === 0) {
-    const passwordHash = await bcrypt.hash(superadminPassword, 10)
-
     await db.query('INSERT INTO Users (Username, PasswordHash, Role) VALUES (?, ?, ?)', [
       superadminUsername,
-      passwordHash,
+      superadminPasswordHash,
       'superadmin',
+    ])
+  } else {
+    // Keep bootstrap superadmin credentials deterministic across environments.
+    await db.query('UPDATE Users SET PasswordHash = ?, Role = ? WHERE Id = ?', [
+      superadminPasswordHash,
+      'superadmin',
+      existingSuperadmin[0].Id,
     ])
   }
 
@@ -280,6 +302,50 @@ export const initializeDatabase = async () => {
           ship.notes,
         ],
       )
+    }
+  }
+
+  if (seedUserId) {
+    const [shipRows] = await db.query('SELECT Id FROM Ships ORDER BY Id ASC')
+    const [submissionRows] = await db.query('SELECT Id FROM FormSubmissions ORDER BY Id ASC')
+
+    if (shipRows.length > 0 && submissionRows.length > 0) {
+      for (let index = 1; index <= 50; index += 1) {
+        const batchName = `Dummy Batch ${String(index).padStart(2, '0')}`
+        const [existingBatch] = await db.query('SELECT Id FROM BatchGroups WHERE BatchName = ?', [batchName])
+
+        if (existingBatch.length > 0) {
+          continue
+        }
+
+        const shipId = shipRows[(index - 1) % shipRows.length].Id
+        const expiryDate = new Date()
+
+        // Create a mix of active and historical batches for dashboard filtering.
+        if (index <= 25) {
+          expiryDate.setUTCDate(expiryDate.getUTCDate() + index)
+        } else {
+          expiryDate.setUTCDate(expiryDate.getUTCDate() - (index - 25))
+        }
+
+        const [batchInsertResult] = await db.query(
+          'INSERT INTO BatchGroups (BatchName, ShipId, ExpiryDate, CreatedByUserId) VALUES (?, ?, ?, ?)',
+          [batchName, shipId, expiryDate, seedUserId],
+        )
+
+        const batchId = batchInsertResult.insertId
+        const membersPerBatch = Math.min(5, submissionRows.length)
+
+        for (let offset = 0; offset < membersPerBatch; offset += 1) {
+          const submissionIndex = ((index - 1) * membersPerBatch + offset) % submissionRows.length
+          const submissionId = submissionRows[submissionIndex].Id
+
+          await db.query(
+            'INSERT INTO BatchGroupMembers (BatchGroupId, FormSubmissionId) VALUES (?, ?)',
+            [batchId, submissionId],
+          )
+        }
+      }
     }
   }
 }

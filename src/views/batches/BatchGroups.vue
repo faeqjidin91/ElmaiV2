@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { useAuthStore } from '@/stores/auth'
 
@@ -11,8 +11,6 @@ const loadingUsers = ref(false)
 const loadingShips = ref(false)
 const loadingBatches = ref(false)
 const creatingBatch = ref(false)
-const successMessage = ref('')
-const errorMessage = ref('')
 const batchFilter = ref('active')
 const candidateSearch = ref('')
 const candidatePickerOpen = ref(false)
@@ -26,6 +24,54 @@ const showBatchFormModal = ref(false)
 const showBatchDetailsModal = ref(false)
 const loadingBatchDetails = ref(false)
 const selectedBatch = ref(null)
+const alertMessage = ref('')
+const alertColor = ref('success')
+const alertTimerId = ref(null)
+const batchSortKey = ref('createdAt')
+const batchSortDirection = ref('desc')
+const currentPage = ref(1)
+const batchSearchTerm = ref('')
+
+const MAX_TABLE_ROWS = 25
+
+const clearAlertTimer = () => {
+  if (alertTimerId.value) {
+    clearTimeout(alertTimerId.value)
+    alertTimerId.value = null
+  }
+}
+
+const dismissAlert = () => {
+  alertMessage.value = ''
+  clearAlertTimer()
+}
+
+const notify = (message, color = 'success') => {
+  clearAlertTimer()
+  alertColor.value = color
+  alertMessage.value = message
+  alertTimerId.value = setTimeout(() => {
+    alertMessage.value = ''
+    alertTimerId.value = null
+  }, 3000)
+}
+
+const showError = (error, fallbackMessage = 'Unexpected error.') => {
+  notify(error?.message || fallbackMessage, 'danger')
+}
+
+const formatLocalDateTime = (value) => {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
+
+const formatLocalDate = (value) => {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+  }).format(new Date(value))
+}
 
 const batchForm = reactive({
   batchName: '',
@@ -72,6 +118,83 @@ const filteredCandidates = computed(() => {
 const activeCount = computed(() => batches.value.filter((batch) => batch.isActive).length)
 const historicalCount = computed(() => batches.value.filter((batch) => !batch.isActive).length)
 
+const filteredBatchRows = computed(() => {
+  const query = batchSearchTerm.value.trim().toLowerCase()
+  if (!query) {
+    return batches.value
+  }
+
+  return batches.value.filter((batch) => {
+    return [
+      String(batch.id),
+      batch.batchName,
+      batch.shipName,
+      batch.shipCode,
+      batch.createdBy,
+      batch.memberNames,
+      String(batch.memberCount),
+      batch.isActive ? 'active' : 'expired',
+    ].some((value) => String(value || '').toLowerCase().includes(query))
+  })
+})
+
+const sortedBatches = computed(() => {
+  const direction = batchSortDirection.value === 'asc' ? 1 : -1
+
+  return [...filteredBatchRows.value].sort((a, b) => {
+    const key = batchSortKey.value
+
+    if (key === 'memberCount') {
+      return (Number(a.memberCount || 0) - Number(b.memberCount || 0)) * direction
+    }
+
+    if (key === 'isActive') {
+      return (Number(a.isActive) - Number(b.isActive)) * direction
+    }
+
+    if (key === 'createdAt' || key === 'expiryDate') {
+      return (new Date(a[key]).getTime() - new Date(b[key]).getTime()) * direction
+    }
+
+    const left = String(a[key] || '').toLowerCase()
+    const right = String(b[key] || '').toLowerCase()
+    if (left === right) {
+      return 0
+    }
+
+    return (left > right ? 1 : -1) * direction
+  })
+})
+
+const totalBatchPages = computed(() => Math.max(1, Math.ceil(sortedBatches.value.length / MAX_TABLE_ROWS)))
+const visibleBatches = computed(() => {
+  const startIndex = (currentPage.value - 1) * MAX_TABLE_ROWS
+  return sortedBatches.value.slice(startIndex, startIndex + MAX_TABLE_ROWS)
+})
+
+const goToBatchPage = (page) => {
+  currentPage.value = Math.min(Math.max(1, page), totalBatchPages.value)
+}
+
+const setBatchSort = (key) => {
+  if (batchSortKey.value === key) {
+    batchSortDirection.value = batchSortDirection.value === 'asc' ? 'desc' : 'asc'
+    currentPage.value = 1
+    return
+  }
+
+  batchSortKey.value = key
+  batchSortDirection.value = 'asc'
+  currentPage.value = 1
+}
+
+const batchSortIndicator = (key) => {
+  if (batchSortKey.value !== key) {
+    return ''
+  }
+  return batchSortDirection.value === 'asc' ? '↑' : '↓'
+}
+
 const parseApiResponse = async (response, fallbackMessage) => {
   const contentType = response.headers.get('content-type') || ''
 
@@ -106,7 +229,7 @@ const fetchUsers = async () => {
 
     submissionUsers.value = await parseApiResponse(response, 'Failed to load submitted users.')
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load submitted users.')
   } finally {
     loadingUsers.value = false
   }
@@ -123,7 +246,7 @@ const fetchShips = async () => {
 
     ships.value = await parseApiResponse(response, 'Failed to load ships.')
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load ships.')
   } finally {
     loadingShips.value = false
   }
@@ -139,12 +262,23 @@ const fetchBatches = async () => {
     })
 
     batches.value = await parseApiResponse(response, 'Failed to load batch groups.')
+    currentPage.value = 1
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load batch groups.')
   } finally {
     loadingBatches.value = false
   }
 }
+
+watch(totalBatchPages, (pages) => {
+  if (currentPage.value > pages) {
+    currentPage.value = pages
+  }
+})
+
+watch(batchSearchTerm, () => {
+  currentPage.value = 1
+})
 
 const toggleUserSelection = (submissionId, checked) => {
   if (checked) {
@@ -237,8 +371,7 @@ const resetBatchForm = () => {
 }
 
 const openCreateBatchModal = () => {
-  successMessage.value = ''
-  errorMessage.value = ''
+  alertMessage.value = ''
   batchForm.batchName = ''
   batchForm.shipId = ''
   batchForm.expiryDate = ''
@@ -253,11 +386,10 @@ const openCreateBatchModal = () => {
 }
 
 const createBatch = async () => {
-  successMessage.value = ''
-  errorMessage.value = ''
+  alertMessage.value = ''
 
   if (!batchForm.batchName || !batchForm.shipId || !batchForm.expiryDate || batchForm.submissionIds.length === 0) {
-    errorMessage.value = 'Batch name, ship, expiry date, and at least one selected submitted user are required.'
+    notify('Batch name, ship, expiry date, and at least one selected submitted user are required.', 'danger')
     return
   }
 
@@ -280,19 +412,22 @@ const createBatch = async () => {
     await parseApiResponse(response, isEditing.value ? 'Failed to update batch group.' : 'Failed to create batch group.')
     const wasEditing = isEditing.value
     resetBatchForm()
-    successMessage.value = wasEditing
+    notify(
+      wasEditing
       ? 'Batch group updated successfully.'
-      : 'Batch group created successfully.'
+      : 'Batch group created successfully.',
+    )
     batchFilter.value = 'active'
     await fetchBatches()
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, isEditing.value ? 'Failed to update batch group.' : 'Failed to create batch group.')
   } finally {
     creatingBatch.value = false
   }
 }
 
 const onFilterChange = async () => {
+  currentPage.value = 1
   await fetchBatches()
 }
 
@@ -310,7 +445,7 @@ const openBatchDetails = async (batchId) => {
 
     selectedBatch.value = await parseApiResponse(response, 'Failed to load batch details.')
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load batch details.')
     showBatchDetailsModal.value = false
   } finally {
     loadingBatchDetails.value = false
@@ -318,8 +453,7 @@ const openBatchDetails = async (batchId) => {
 }
 
 const startEditBatch = async (batchId) => {
-  successMessage.value = ''
-  errorMessage.value = ''
+  alertMessage.value = ''
 
   try {
     const response = await fetch(`/api/batches/${batchId}`, {
@@ -341,13 +475,16 @@ const startEditBatch = async (batchId) => {
     editingBatchId.value = batch.id
     showBatchFormModal.value = true
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load batch for editing.')
   }
 }
 
 const deleteBatch = async (batchId) => {
-  successMessage.value = ''
-  errorMessage.value = ''
+  alertMessage.value = ''
+
+  if (!window.confirm('Are you sure you want to remove this batch group?')) {
+    return
+  }
 
   try {
     const response = await fetch(`/api/batches/${batchId}`, {
@@ -361,10 +498,10 @@ const deleteBatch = async (batchId) => {
     if (editingBatchId.value === batchId) {
       resetBatchForm()
     }
-    successMessage.value = 'Batch group removed successfully.'
+    notify('Batch group removed successfully.')
     await fetchBatches()
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to remove batch group.')
   }
 }
 
@@ -374,6 +511,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearAlertTimer()
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
 })
 </script>
@@ -417,8 +555,9 @@ onBeforeUnmount(() => {
       </CCol>
     </CRow>
 
-    <CAlert v-if="successMessage" color="success">{{ successMessage }}</CAlert>
-    <CAlert v-if="errorMessage" color="danger">{{ errorMessage }}</CAlert>
+    <CAlert v-if="alertMessage" class="floating-alert" :color="alertColor" dismissible @close="dismissAlert">
+      {{ alertMessage }}
+    </CAlert>
 
     <CRow class="g-4">
       <CCol xl="12">
@@ -445,31 +584,61 @@ onBeforeUnmount(() => {
             </div>
           </CCardHeader>
           <CCardBody>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-2">
+              <CFormInput
+                v-model="batchSearchTerm"
+                class="search-input"
+                placeholder="Search by batch, ship, creator, members, status"
+              />
+            <div class="small text-body-secondary">
+              Showing {{ visibleBatches.length }} of {{ sortedBatches.length }} rows
+            </div>
+            </div>
             <div v-if="loadingBatches" class="text-body-secondary">Loading batch groups...</div>
             <CTable v-else hover responsive small class="compact-table align-middle">
               <CTableHead>
                 <CTableRow>
-                  <CTableHeaderCell>Batch</CTableHeaderCell>
-                  <CTableHeaderCell>Members</CTableHeaderCell>
-                  <CTableHeaderCell>Expiry</CTableHeaderCell>
-                  <CTableHeaderCell>Created By</CTableHeaderCell>
-                  <CTableHeaderCell>Status</CTableHeaderCell>
+                  <CTableHeaderCell>
+                    <button type="button" class="table-sort-button" @click="setBatchSort('batchName')">
+                      Batch {{ batchSortIndicator('batchName') }}
+                    </button>
+                  </CTableHeaderCell>
+                  <CTableHeaderCell>
+                    <button type="button" class="table-sort-button" @click="setBatchSort('memberCount')">
+                      Members {{ batchSortIndicator('memberCount') }}
+                    </button>
+                  </CTableHeaderCell>
+                  <CTableHeaderCell>
+                    <button type="button" class="table-sort-button" @click="setBatchSort('expiryDate')">
+                      Expiry {{ batchSortIndicator('expiryDate') }}
+                    </button>
+                  </CTableHeaderCell>
+                  <CTableHeaderCell>
+                    <button type="button" class="table-sort-button" @click="setBatchSort('createdBy')">
+                      Created By {{ batchSortIndicator('createdBy') }}
+                    </button>
+                  </CTableHeaderCell>
+                  <CTableHeaderCell>
+                    <button type="button" class="table-sort-button" @click="setBatchSort('isActive')">
+                      Status {{ batchSortIndicator('isActive') }}
+                    </button>
+                  </CTableHeaderCell>
                   <CTableHeaderCell>Actions</CTableHeaderCell>
                 </CTableRow>
               </CTableHead>
               <CTableBody>
-                <CTableRow v-for="batch in batches" :key="batch.id">
+                <CTableRow v-for="batch in visibleBatches" :key="batch.id">
                   <CTableDataCell>
                     <div class="fw-semibold">{{ batch.batchName }}</div>
                     <div class="small text-body-secondary">
-                      {{ batch.shipName || 'No ship selected' }} | Created {{ new Date(batch.createdAt).toLocaleString() }}
+                      {{ batch.shipName || 'No ship selected' }} | Created {{ formatLocalDateTime(batch.createdAt) }}
                     </div>
                   </CTableDataCell>
                   <CTableDataCell>
                     <div>{{ batch.memberCount }} users</div>
                     <div class="small text-body-secondary member-text">{{ batch.memberNames }}</div>
                   </CTableDataCell>
-                  <CTableDataCell>{{ new Date(batch.expiryDate).toLocaleDateString() }}</CTableDataCell>
+                  <CTableDataCell>{{ formatLocalDate(batch.expiryDate) }}</CTableDataCell>
                   <CTableDataCell>{{ batch.createdBy }}</CTableDataCell>
                   <CTableDataCell>
                     <CBadge :color="batch.isActive ? 'success' : 'secondary'">
@@ -490,13 +659,37 @@ onBeforeUnmount(() => {
                     </div>
                   </CTableDataCell>
                 </CTableRow>
-                <CTableRow v-if="batches.length === 0">
+                <CTableRow v-if="visibleBatches.length === 0">
                   <CTableDataCell colspan="6" class="text-center text-body-secondary py-4">
                     No batch groups found for this view.
                   </CTableDataCell>
                 </CTableRow>
               </CTableBody>
             </CTable>
+
+            <div v-if="sortedBatches.length > 0" class="d-flex justify-content-between align-items-center mt-3">
+              <small class="text-body-secondary">Page {{ currentPage }} of {{ totalBatchPages }}</small>
+              <div class="d-flex gap-2">
+                <CButton
+                  color="secondary"
+                  variant="outline"
+                  size="sm"
+                  :disabled="currentPage <= 1"
+                  @click="goToBatchPage(currentPage - 1)"
+                >
+                  Previous
+                </CButton>
+                <CButton
+                  color="secondary"
+                  variant="outline"
+                  size="sm"
+                  :disabled="currentPage >= totalBatchPages"
+                  @click="goToBatchPage(currentPage + 1)"
+                >
+                  Next
+                </CButton>
+              </div>
+            </div>
           </CCardBody>
         </CCard>
       </CCol>
@@ -583,12 +776,6 @@ onBeforeUnmount(() => {
             />
 
             <div v-if="candidatePickerOpen" class="candidate-picker-panel">
-              <div class="d-flex justify-content-end mb-2">
-                <CButton color="secondary" variant="outline" size="sm" class="icon-only-button" @click="closeCandidatePicker">
-                  <CIcon icon="cil-x-circle" />
-                </CButton>
-              </div>
-
               <div class="user-picker">
                 <div v-if="loadingUsers" class="text-body-secondary">Loading submitted users...</div>
                 <label v-for="user in filteredCandidates" :key="user.id" class="user-option">
@@ -607,6 +794,12 @@ onBeforeUnmount(() => {
                 <div v-if="!loadingUsers && filteredCandidates.length === 0" class="text-body-secondary small p-2">
                   No submitted users match the current search.
                 </div>
+              </div>
+
+              <div class="d-flex justify-content-end mt-2">
+                <CButton color="secondary" variant="outline" size="sm" @click="closeCandidatePicker">
+                  Close
+                </CButton>
               </div>
             </div>
           </div>
@@ -642,7 +835,7 @@ onBeforeUnmount(() => {
           <div class="mb-3">
             <div class="fw-semibold fs-5">{{ selectedBatch.batchName }}</div>
             <div class="small text-body-secondary">
-              Ship {{ selectedBatch.shipName || 'N/A' }} | Expires {{ new Date(selectedBatch.expiryDate).toLocaleDateString() }} | Created by {{ selectedBatch.createdBy }}
+              Ship {{ selectedBatch.shipName || 'N/A' }} | Expires {{ formatLocalDate(selectedBatch.expiryDate) }} | Created by {{ selectedBatch.createdBy }}
             </div>
           </div>
 
@@ -657,7 +850,7 @@ onBeforeUnmount(() => {
                       <div class="small text-body-secondary">{{ member.icPassportNumber }}</div>
                       <div class="small text-body-secondary">Submitted by {{ member.submittedBy }}</div>
                       <div class="small text-body-secondary">
-                        {{ new Date(member.createdAt).toLocaleString() }}
+                        {{ formatLocalDateTime(member.createdAt) }}
                       </div>
                     </div>
                   </div>
@@ -732,7 +925,7 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(22, 57, 94, 0.12);
   border-radius: 12px;
   padding: 10px;
-  background: rgba(255, 255, 255, 0.92);
+  background: #fff;
   box-shadow: 0 14px 30px rgba(17, 61, 97, 0.14);
 }
 
@@ -745,7 +938,7 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(22, 57, 94, 0.12);
   border-radius: 12px;
   padding: 10px;
-  background: rgba(255, 255, 255, 0.86);
+  background: #fff;
   box-shadow: 0 14px 30px rgba(17, 61, 97, 0.14);
 }
 
@@ -759,14 +952,6 @@ onBeforeUnmount(() => {
 
 .candidate-search {
   flex: 1 1 auto;
-}
-
-.icon-only-button {
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .user-option {
@@ -820,6 +1005,27 @@ onBeforeUnmount(() => {
   padding-top: 0.65rem;
   padding-bottom: 0.65rem;
   font-size: 0.93rem;
+}
+
+.table-sort-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+}
+
+.search-input {
+  max-width: 460px;
+}
+
+.floating-alert {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  width: min(560px, calc(100vw - 2rem));
 }
 
 .member-text {

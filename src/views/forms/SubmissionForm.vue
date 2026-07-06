@@ -1,19 +1,58 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
 const submitting = ref(false)
 const loadingList = ref(false)
-const successMessage = ref('')
-const errorMessage = ref('')
 const searchTerm = ref('')
 const formEntries = ref([])
 const showImageModal = ref(false)
 const showAddFormModal = ref(false)
 const selectedEntry = ref(null)
 const newImagePreview = ref('')
+const alertMessage = ref('')
+const alertColor = ref('success')
+const alertTimerId = ref(null)
+const entrySortKey = ref('createdAt')
+const entrySortDirection = ref('desc')
+const currentPage = ref(1)
+
+const MAX_TABLE_ROWS = 25
+
+const clearAlertTimer = () => {
+  if (alertTimerId.value) {
+    clearTimeout(alertTimerId.value)
+    alertTimerId.value = null
+  }
+}
+
+const dismissAlert = () => {
+  alertMessage.value = ''
+  clearAlertTimer()
+}
+
+const notify = (message, color = 'success') => {
+  clearAlertTimer()
+  alertColor.value = color
+  alertMessage.value = message
+  alertTimerId.value = setTimeout(() => {
+    alertMessage.value = ''
+    alertTimerId.value = null
+  }, 3000)
+}
+
+const showError = (error, fallbackMessage = 'Unexpected error.') => {
+  notify(error?.message || fallbackMessage, 'danger')
+}
+
+const formatLocalDateTime = (value) => {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
 
 const formData = reactive({
   fullName: '',
@@ -35,8 +74,56 @@ const filteredEntries = computed(() => {
       })
     : formEntries.value
 
-  return rows.slice(0, 50)
+  const direction = entrySortDirection.value === 'asc' ? 1 : -1
+  const sortedRows = [...rows].sort((a, b) => {
+    if (entrySortKey.value === 'id') {
+      return (Number(a.id) - Number(b.id)) * direction
+    }
+
+    if (entrySortKey.value === 'createdAt') {
+      return (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) * direction
+    }
+
+    const left = String(a[entrySortKey.value] || '').toLowerCase()
+    const right = String(b[entrySortKey.value] || '').toLowerCase()
+    if (left === right) {
+      return 0
+    }
+
+    return (left > right ? 1 : -1) * direction
+  })
+
+  return sortedRows
 })
+
+const totalEntryPages = computed(() => Math.max(1, Math.ceil(filteredEntries.value.length / MAX_TABLE_ROWS)))
+const visibleEntries = computed(() => {
+  const startIndex = (currentPage.value - 1) * MAX_TABLE_ROWS
+  return filteredEntries.value.slice(startIndex, startIndex + MAX_TABLE_ROWS)
+})
+
+const goToEntryPage = (page) => {
+  currentPage.value = Math.min(Math.max(1, page), totalEntryPages.value)
+}
+
+const setEntrySort = (key) => {
+  if (entrySortKey.value === key) {
+    entrySortDirection.value = entrySortDirection.value === 'asc' ? 'desc' : 'asc'
+    currentPage.value = 1
+    return
+  }
+
+  entrySortKey.value = key
+  entrySortDirection.value = 'asc'
+  currentPage.value = 1
+}
+
+const entrySortIndicator = (key) => {
+  if (entrySortKey.value !== key) {
+    return ''
+  }
+  return entrySortDirection.value === 'asc' ? '↑' : '↓'
+}
 
 const fetchForms = async () => {
   loadingList.value = true
@@ -53,12 +140,23 @@ const fetchForms = async () => {
     }
 
     formEntries.value = await response.json()
+    currentPage.value = 1
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to load form submissions.')
   } finally {
     loadingList.value = false
   }
 }
+
+watch(searchTerm, () => {
+  currentPage.value = 1
+})
+
+watch(totalEntryPages, (pages) => {
+  if (currentPage.value > pages) {
+    currentPage.value = pages
+  }
+})
 
 const openImagePreview = (entry) => {
   selectedEntry.value = entry
@@ -89,18 +187,16 @@ const resetForm = () => {
 }
 
 const openAddForm = () => {
-  errorMessage.value = ''
-  successMessage.value = ''
+  alertMessage.value = ''
   resetForm()
   showAddFormModal.value = true
 }
 
 const onSubmit = async () => {
-  successMessage.value = ''
-  errorMessage.value = ''
+  alertMessage.value = ''
 
   if (!formData.fullName || !formData.icPassportNumber || !formData.imageBase64) {
-    errorMessage.value = 'All fields are required.'
+    notify('All fields are required.', 'danger')
     return
   }
 
@@ -122,16 +218,17 @@ const onSubmit = async () => {
 
     resetForm()
     showAddFormModal.value = false
-    successMessage.value = 'Form submitted successfully.'
+    notify('Form submitted successfully.')
     await fetchForms()
   } catch (error) {
-    errorMessage.value = error.message
+    showError(error, 'Failed to submit form.')
   } finally {
     submitting.value = false
   }
 }
 
 onMounted(fetchForms)
+onBeforeUnmount(clearAlertTimer)
 </script>
 
 <template>
@@ -155,8 +252,9 @@ onMounted(fetchForms)
       </CCol>
     </CRow>
 
-    <CAlert v-if="successMessage" color="success">{{ successMessage }}</CAlert>
-    <CAlert v-if="errorMessage" color="danger">{{ errorMessage }}</CAlert>
+    <CAlert v-if="alertMessage" class="floating-alert" :color="alertColor" dismissible @close="dismissAlert">
+      {{ alertMessage }}
+    </CAlert>
 
     <CCard class="panel-card mt-4">
       <CCardHeader>User Submission List</CCardHeader>
@@ -167,38 +265,82 @@ onMounted(fetchForms)
             class="search-input"
             placeholder="Search by ID, name, IC/passport, or submitted by"
           />
-          <small class="text-body-secondary">Showing up to 50 rows</small>
+          <small class="text-body-secondary">Showing {{ visibleEntries.length }} of {{ filteredEntries.length }} rows</small>
         </div>
         <div v-if="loadingList">Loading form submissions...</div>
         <CTable v-else hover responsive small class="compact-table align-middle">
           <CTableHead>
             <CTableRow>
-              <CTableHeaderCell>ID</CTableHeaderCell>
-              <CTableHeaderCell>Name</CTableHeaderCell>
-              <CTableHeaderCell>IC/Passport</CTableHeaderCell>
-              <CTableHeaderCell>Submitted By</CTableHeaderCell>
-              <CTableHeaderCell>Created At</CTableHeaderCell>
+              <CTableHeaderCell>
+                <button type="button" class="table-sort-button" @click="setEntrySort('id')">
+                  ID {{ entrySortIndicator('id') }}
+                </button>
+              </CTableHeaderCell>
+              <CTableHeaderCell>
+                <button type="button" class="table-sort-button" @click="setEntrySort('fullName')">
+                  Name {{ entrySortIndicator('fullName') }}
+                </button>
+              </CTableHeaderCell>
+              <CTableHeaderCell>
+                <button type="button" class="table-sort-button" @click="setEntrySort('icPassportNumber')">
+                  IC/Passport {{ entrySortIndicator('icPassportNumber') }}
+                </button>
+              </CTableHeaderCell>
+              <CTableHeaderCell>
+                <button type="button" class="table-sort-button" @click="setEntrySort('submittedBy')">
+                  Submitted By {{ entrySortIndicator('submittedBy') }}
+                </button>
+              </CTableHeaderCell>
+              <CTableHeaderCell>
+                <button type="button" class="table-sort-button" @click="setEntrySort('createdAt')">
+                  Created At {{ entrySortIndicator('createdAt') }}
+                </button>
+              </CTableHeaderCell>
               <CTableHeaderCell>Image</CTableHeaderCell>
             </CTableRow>
           </CTableHead>
           <CTableBody>
-            <CTableRow v-for="entry in filteredEntries" :key="entry.id">
+            <CTableRow v-for="entry in visibleEntries" :key="entry.id">
               <CTableDataCell>{{ entry.id }}</CTableDataCell>
               <CTableDataCell>{{ entry.fullName }}</CTableDataCell>
               <CTableDataCell>{{ entry.icPassportNumber }}</CTableDataCell>
               <CTableDataCell>{{ entry.submittedBy }}</CTableDataCell>
-              <CTableDataCell>{{ new Date(entry.createdAt).toLocaleString() }}</CTableDataCell>
+              <CTableDataCell>{{ formatLocalDateTime(entry.createdAt) }}</CTableDataCell>
               <CTableDataCell>
                 <CButton color="info" size="sm" @click="openImagePreview(entry)">Preview</CButton>
               </CTableDataCell>
             </CTableRow>
-            <CTableRow v-if="filteredEntries.length === 0">
+            <CTableRow v-if="visibleEntries.length === 0">
               <CTableDataCell colspan="6" class="text-center text-body-secondary py-4">
                 No matching submissions found.
               </CTableDataCell>
             </CTableRow>
           </CTableBody>
         </CTable>
+
+        <div v-if="filteredEntries.length > 0" class="d-flex justify-content-between align-items-center mt-3">
+          <small class="text-body-secondary">Page {{ currentPage }} of {{ totalEntryPages }}</small>
+          <div class="d-flex gap-2">
+            <CButton
+              color="secondary"
+              variant="outline"
+              size="sm"
+              :disabled="currentPage <= 1"
+              @click="goToEntryPage(currentPage - 1)"
+            >
+              Previous
+            </CButton>
+            <CButton
+              color="secondary"
+              variant="outline"
+              size="sm"
+              :disabled="currentPage >= totalEntryPages"
+              @click="goToEntryPage(currentPage + 1)"
+            >
+              Next
+            </CButton>
+          </div>
+        </div>
       </CCardBody>
     </CCard>
 
@@ -219,7 +361,7 @@ onMounted(fetchForms)
               <div class="biodata-label">Submitted By</div>
               <div>{{ selectedEntry.submittedBy }}</div>
               <div class="biodata-label">Created At</div>
-              <div>{{ new Date(selectedEntry.createdAt).toLocaleString() }}</div>
+              <div>{{ formatLocalDateTime(selectedEntry.createdAt) }}</div>
             </div>
           </CCol>
           <CCol md="5" class="text-center">
@@ -312,6 +454,23 @@ onMounted(fetchForms)
   padding-top: 0.55rem;
   padding-bottom: 0.55rem;
   font-size: 0.92rem;
+}
+
+.table-sort-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+}
+
+.floating-alert {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  width: min(560px, calc(100vw - 2rem));
 }
 
 .preview-image {
