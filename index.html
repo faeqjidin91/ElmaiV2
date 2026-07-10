@@ -33,11 +33,15 @@
     <meta name="msapplication-TileImage" content="/ms-icon-144x144.png">
     <meta name="theme-color" content="#ffffff">
     <script>
-      const userMode = localStorage.getItem('coreui-free-vue-admin-template-theme');
-	    const systemDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-			if (userMode === 'dark' || (userMode !== 'light' && systemDarkMode)) {
-				document.documentElement.dataset.coreuiTheme = 'dark';
-			}
+      const themeStorageKey = 'coreui-free-vue-admin-template-theme'
+      const userMode = localStorage.getItem(themeStorageKey)
+      const systemDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+
+      if (userMode === 'dark' || (userMode === 'auto' && systemDarkMode)) {
+        document.documentElement.dataset.coreuiTheme = 'dark'
+      } else {
+        document.documentElement.dataset.coreuiTheme = 'light'
+      }
     </script>
   </head>
   <body>
