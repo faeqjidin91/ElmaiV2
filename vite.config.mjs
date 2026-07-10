@@ -33,7 +33,9 @@ export default defineConfig(() => {
       extensions: ['.mjs', '.js', '.ts', '.jsx', '.tsx', '.json', '.vue', '.scss'],
     },
     server: {
+      host: true,
       port: 3000,
+      allowedHosts: ['elmai.linkpc.net'],
       proxy: {
         '/api': {
           target: 'http://localhost:3001',
