@@ -9,8 +9,14 @@ import { useSidebarStore } from '@/stores/sidebar.js'
 const headerClassNames = ref('mb-4 p-0')
 const { colorMode, setColorMode } = useColorModes('coreui-free-vue-admin-template-theme')
 const sidebar = useSidebarStore()
+const COLOR_MODE_STORAGE_KEY = 'coreui-free-vue-admin-template-theme'
 
 onMounted(() => {
+  // Keep default UI in light mode on fresh clones unless user has explicitly chosen a mode.
+  if (!localStorage.getItem(COLOR_MODE_STORAGE_KEY)) {
+    setColorMode('light')
+  }
+
   document.addEventListener('scroll', () => {
     if (document.documentElement.scrollTop > 0) {
       headerClassNames.value = 'mb-4 p-0 shadow-sm'
